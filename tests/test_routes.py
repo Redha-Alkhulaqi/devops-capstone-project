@@ -12,12 +12,14 @@ from tests.factories import AccountFactory
 from service.common import status  # HTTP Status Codes
 from service.models import db, Account, init_db
 from service.routes import app
+from service import talisman
 
 DATABASE_URI = os.getenv(
     "DATABASE_URI", "postgresql://postgres:postgres@localhost:5432/postgres"
 )
 
 BASE_URL = "/accounts"
+HTTPS_ENVIRON = {'wsgi.url_scheme': 'https'}
 
 
 ######################################################################
@@ -34,7 +36,8 @@ class TestAccountService(TestCase):
         app.config["SQLALCHEMY_DATABASE_URI"] = DATABASE_URI
         app.logger.setLevel(logging.CRITICAL)
         init_db(app)
-
+        talisman.force_https = False
+        
     @classmethod
     def tearDownClass(cls):
         """Runs once before test suite"""
@@ -135,7 +138,11 @@ class TestAccountService(TestCase):
         data = resp.get_json()
         self.assertEqual(data["name"], account.name)
 
-
+    def test_get_account_not_found(self):
+        """It should not Read an Account that is not found"""
+        resp = self.client.get(f"{BASE_URL}/0")
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+        
     def test_get_account_list(self):
         """It should Get a list of Accounts"""
         self._create_accounts(5)
@@ -150,7 +157,6 @@ class TestAccountService(TestCase):
         test_account = AccountFactory()
         resp = self.client.post(BASE_URL, json=test_account.serialize())
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
-
         # update the account
         new_account = resp.get_json()
         new_account["name"] = "Something Known"
@@ -163,14 +169,30 @@ class TestAccountService(TestCase):
         """It should Delete an Account"""
         account = self._create_accounts(1)[0]
         resp = self.client.delete(f"{BASE_URL}/{account.id}")
-        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)        
- 
-    def test_get_account_not_found(self):
-        """It should not Read an Account that is not found"""
-        resp = self.client.get(f"{BASE_URL}/0")
-        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)    
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)         
 
     def test_method_not_allowed(self):
         """It should not allow an illegal method call"""
         resp = self.client.delete(BASE_URL)
         self.assertEqual(resp.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)       
+   
+    def test_security_headers(self):
+        """It should return security headers"""
+        response = self.client.get('/', environ_overrides=HTTPS_ENVIRON)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        headers = {
+            'X-Frame-Options': 'SAMEORIGIN',
+            'X-XSS-Protection': '1; mode=block',
+            'X-Content-Type-Options': 'nosniff',
+            'Content-Security-Policy': 'default-src \'self\'; object-src \'none\'',
+            'Referrer-Policy': 'strict-origin-when-cross-origin'
+        }
+        for key, value in headers.items():
+            self.assertEqual(response.headers.get(key), value)
+
+    def test_cors_security(self):
+        """It should return a CORS header"""
+        response = self.client.get('/', environ_overrides=HTTPS_ENVIRON)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        # Check for the CORS header
+        self.assertEqual(response.headers.get('Access-Control-Allow-Origin'), '*')
